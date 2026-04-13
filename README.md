@@ -1,6 +1,6 @@
 # NSLSolver C# SDK
 
-C# client for the [NSLSolver](https://nslsolver.com) captcha API. Supports Cloudflare Turnstile and Challenge pages. No third-party dependencies.
+C# client for the [NSLSolver](https://nslsolver.com) captcha API. Supports Cloudflare Turnstile, Challenge pages, and Kasada. No third-party dependencies.
 
 Requires .NET 6+.
 
@@ -28,6 +28,20 @@ var challenge = await solver.SolveChallengeAsync(new ChallengeParams {
     Proxy = "http://user:pass@host:port",
 });
 Console.WriteLine(challenge.CfClearance);
+
+var kasada = await solver.SolveKasadaAsync(new KasadaParams {
+    Url       = "https://example.com/api",
+    UserAgent = "Mozilla/5.0 ... Chrome/131.0.0.0 ...",
+    UaVersion = 131,
+    KasadaConfig = new KasadaConfig {
+        PJsPath = "/ips.js",
+        FpHost  = "https://fp.example.com",
+        TlHost  = "https://tl.example.com",
+    },
+    Proxy = "http://user:pass@host:port",
+});
+Console.WriteLine(kasada.Ct); // x-kpsdk-ct header value
+Console.WriteLine(kasada.Cd); // x-kpsdk-cd header value
 
 var balance = await solver.GetBalanceAsync();
 Console.WriteLine($"{balance.Balance} / {balance.MaxThreads} threads");

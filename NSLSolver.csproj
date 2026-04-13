@@ -4,7 +4,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>NSLSolver</RootNamespace>
     <PackageId>NSLSolver</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>NSLSolver</Authors>
     <Description>C# client for the NSLSolver captcha API.</Description>
     <RepositoryUrl>https://github.com/NSLSolver/NSLSolver-SDK-CSharp</RepositoryUrl>

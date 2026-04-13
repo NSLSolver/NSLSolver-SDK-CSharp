@@ -64,6 +64,33 @@ namespace NSLSolver
             };
         }
 
+        public async Task<KasadaResult> SolveKasadaAsync(KasadaParams p, CancellationToken ct = default)
+        {
+            var cfg = new Dictionary<string, object> {
+                ["PJsPath"] = p.KasadaConfig.PJsPath,
+                ["FpHost"]  = p.KasadaConfig.FpHost,
+                ["TlHost"]  = p.KasadaConfig.TlHost,
+            };
+            if (p.KasadaConfig.CdConstant != null)
+                cfg["CdConstant"] = p.KasadaConfig.CdConstant;
+            var body = new Dictionary<string, object?> {
+                ["type"]           = "kasada",
+                ["url"]            = p.Url,
+                ["user_agent"]     = p.UserAgent,
+                ["ua_version"]     = p.UaVersion,
+                ["kasada_config"]  = cfg,
+                ["proxy"]          = p.Proxy,
+            };
+            var json = await PostAsync("/solve", body, ct).ConfigureAwait(false);
+            var headers = json.GetProperty("headers");
+            return new KasadaResult {
+                Ct = headers.GetProperty("x-kpsdk-ct").GetString()!,
+                Cd = headers.GetProperty("x-kpsdk-cd").GetString()!,
+                V  = headers.GetProperty("x-kpsdk-v").GetString()!,
+                H  = headers.GetProperty("x-kpsdk-h").GetString()!,
+            };
+        }
+
         public async Task<BalanceResult> GetBalanceAsync(CancellationToken ct = default)
         {
             var req = new HttpRequestMessage(HttpMethod.Get, _baseUrl + "/balance");
@@ -175,6 +202,31 @@ namespace NSLSolver
     {
         public string CfClearance { get; set; } = "";
         public string UserAgent   { get; set; } = "";
+    }
+
+    public class KasadaParams
+    {
+        public string       Url          { get; set; } = "";
+        public string       UserAgent    { get; set; } = "";
+        public int          UaVersion    { get; set; }
+        public KasadaConfig KasadaConfig { get; set; } = new();
+        public string?      Proxy        { get; set; }
+    }
+
+    public class KasadaConfig
+    {
+        public string  PJsPath    { get; set; } = "";
+        public string  FpHost     { get; set; } = "";
+        public string  TlHost     { get; set; } = "";
+        public string? CdConstant { get; set; }
+    }
+
+    public class KasadaResult
+    {
+        public string Ct { get; set; } = "";
+        public string Cd { get; set; } = "";
+        public string V  { get; set; } = "";
+        public string H  { get; set; } = "";
     }
 
     public class BalanceResult
