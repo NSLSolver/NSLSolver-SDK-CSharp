@@ -46,7 +46,10 @@ namespace NSLSolver
                 ["user_agent"] = p.UserAgent,
             };
             var json = await PostAsync("/solve", body, ct).ConfigureAwait(false);
-            return new TurnstileResult { Token = json.GetProperty("token").GetString()! };
+            return new TurnstileResult {
+                Token = json.GetProperty("token").GetString()!,
+                Cost  = ReadDouble(json, "cost"),
+            };
         }
 
         public async Task<ChallengeResult> SolveChallengeAsync(ChallengeParams p, CancellationToken ct = default)
@@ -59,20 +62,26 @@ namespace NSLSolver
             };
             var json = await PostAsync("/solve", body, ct).ConfigureAwait(false);
             return new ChallengeResult {
-                CfClearance = json.GetProperty("cookies").GetProperty("cf_clearance").GetString()!,
-                UserAgent   = json.GetProperty("user_agent").GetString()!,
+                CfClearance = json.TryGetProperty("cookies", out var cookies) && cookies.TryGetProperty("cf_clearance", out var cf)
+                    ? cf.GetString() ?? ""
+                    : "",
+                UserAgent = json.TryGetProperty("user_agent", out var ua) ? ua.GetString() ?? "" : "",
+                Token     = json.TryGetProperty("token", out var tok) && tok.ValueKind == JsonValueKind.String
+                    ? tok.GetString()
+                    : null,
+                Cost = ReadDouble(json, "cost"),
             };
         }
 
         public async Task<KasadaResult> SolveKasadaAsync(KasadaParams p, CancellationToken ct = default)
         {
             var cfg = new Dictionary<string, object> {
-                ["PJsPath"] = p.KasadaConfig.PJsPath,
-                ["FpHost"]  = p.KasadaConfig.FpHost,
-                ["TlHost"]  = p.KasadaConfig.TlHost,
+                ["p_js_path"] = p.KasadaConfig.PJsPath,
+                ["fp_host"]   = p.KasadaConfig.FpHost,
+                ["tl_host"]   = p.KasadaConfig.TlHost,
             };
             if (p.KasadaConfig.CdConstant != null)
-                cfg["CdConstant"] = p.KasadaConfig.CdConstant;
+                cfg["cd_constant"] = p.KasadaConfig.CdConstant;
             var body = new Dictionary<string, object?> {
                 ["type"]           = "kasada",
                 ["url"]            = p.Url,
@@ -84,10 +93,43 @@ namespace NSLSolver
             var json = await PostAsync("/solve", body, ct).ConfigureAwait(false);
             var headers = json.GetProperty("headers");
             return new KasadaResult {
-                Ct = headers.GetProperty("x-kpsdk-ct").GetString()!,
-                Cd = headers.GetProperty("x-kpsdk-cd").GetString()!,
-                V  = headers.GetProperty("x-kpsdk-v").GetString()!,
-                H  = headers.GetProperty("x-kpsdk-h").GetString()!,
+                Ct   = headers.GetProperty("x-kpsdk-ct").GetString()!,
+                Cd   = headers.GetProperty("x-kpsdk-cd").GetString()!,
+                V    = headers.GetProperty("x-kpsdk-v").GetString()!,
+                H    = headers.GetProperty("x-kpsdk-h").GetString()!,
+                Cost = ReadDouble(json, "cost"),
+            };
+        }
+
+        /// <summary>
+        /// Solve an Akamai Bot Manager challenge. All three of <c>Url</c>,
+        /// <c>UserAgent</c>, and <c>Proxy</c> are required. The returned
+        /// <c>_abck</c> cookie is bound to the proxy's egress IP and to the
+        /// submitted UA — replay on the same proxy and user agent.
+        /// </summary>
+        public async Task<AkamaiResult> SolveAkamaiAsync(AkamaiParams p, CancellationToken ct = default)
+        {
+            var body = new Dictionary<string, object?> {
+                ["type"]       = "akamai",
+                ["url"]        = p.Url,
+                ["user_agent"] = p.UserAgent,
+                ["proxy"]      = p.Proxy,
+            };
+            var json = await PostAsync("/solve", body, ct).ConfigureAwait(false);
+
+            var cookies = new Dictionary<string, string>();
+            if (json.TryGetProperty("cookies", out var cookiesEl) && cookiesEl.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in cookiesEl.EnumerateObject())
+                {
+                    if (prop.Value.ValueKind == JsonValueKind.String)
+                        cookies[prop.Name] = prop.Value.GetString() ?? "";
+                }
+            }
+
+            return new AkamaiResult {
+                Cookies = cookies,
+                Cost    = ReadDouble(json, "cost"),
             };
         }
 
@@ -103,10 +145,16 @@ namespace NSLSolver
             if (!resp.IsSuccessStatusCode)
                 throw MakeException((int)resp.StatusCode, json);
 
+            var maxCpm = json.TryGetProperty("max_cpm", out var mc) ? mc.GetInt32() : 0;
             var result = new BalanceResult {
                 Balance    = json.GetProperty("balance").GetDouble(),
-                MaxThreads = json.GetProperty("max_threads").GetInt32(),
                 Unlimited  = json.TryGetProperty("unlimited", out var u) && u.GetBoolean(),
+                MaxCpm     = maxCpm,
+                CurrentCpm = json.TryGetProperty("current_cpm", out var cc) ? cc.GetInt32() : 0,
+                CpmLimit   = json.TryGetProperty("cpm_limit", out var cl) ? cl.GetInt32() : maxCpm,
+                UnlimitedExpiresAt = json.TryGetProperty("unlimited_expires_at", out var ue) && ue.ValueKind == JsonValueKind.String
+                    ? ue.GetString()
+                    : null,
             };
             if (json.TryGetProperty("allowed_types", out var arr))
             {
@@ -115,6 +163,13 @@ namespace NSLSolver
                 result.AllowedTypes = list.ToArray();
             }
             return result;
+        }
+
+        private static double ReadDouble(JsonElement json, string key)
+        {
+            if (json.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number)
+                return v.GetDouble();
+            return 0.0;
         }
 
         private async Task<JsonElement> PostAsync(string path, Dictionary<string, object?> body, CancellationToken ct)
@@ -196,12 +251,18 @@ namespace NSLSolver
     public class TurnstileResult
     {
         public string Token { get; set; } = "";
+        /// <summary>USD deducted from the account balance for this solve.</summary>
+        public double Cost { get; set; }
     }
 
     public class ChallengeResult
     {
-        public string CfClearance { get; set; } = "";
-        public string UserAgent   { get; set; } = "";
+        public string  CfClearance { get; set; } = "";
+        public string  UserAgent   { get; set; } = "";
+        /// <summary>Set when the challenge page returned a Turnstile-style token instead of cookies.</summary>
+        public string? Token       { get; set; }
+        /// <summary>USD deducted from the account balance for this solve.</summary>
+        public double  Cost        { get; set; }
     }
 
     public class KasadaParams
@@ -227,13 +288,45 @@ namespace NSLSolver
         public string Cd { get; set; } = "";
         public string V  { get; set; } = "";
         public string H  { get; set; } = "";
+        /// <summary>USD deducted from the account balance for this solve.</summary>
+        public double Cost { get; set; }
+    }
+
+    public class AkamaiParams
+    {
+        public string Url       { get; set; } = "";
+        /// <summary>Required. Replay the returned cookies with this same UA.</summary>
+        public string UserAgent { get; set; } = "";
+        /// <summary>Required. <c>_abck</c> is bound to this proxy's egress IP.</summary>
+        public string Proxy     { get; set; } = "";
+    }
+
+    public class AkamaiResult
+    {
+        /// <summary>
+        /// Cookie jar including <c>_abck</c>. Replay on the same UA + proxy/exit IP.
+        /// </summary>
+        public Dictionary<string, string> Cookies { get; set; } = new();
+        /// <summary>USD deducted from the account balance for this solve.</summary>
+        public double Cost { get; set; }
+
+        /// <summary>Shortcut for the <c>_abck</c> cookie value.</summary>
+        public string? Abck => Cookies.TryGetValue("_abck", out var v) ? v : null;
     }
 
     public class BalanceResult
     {
         public double   Balance      { get; set; }
-        public int      MaxThreads   { get; set; }
         public bool     Unlimited    { get; set; }
         public string[] AllowedTypes { get; set; } = Array.Empty<string>();
+
+        /// <summary>Per-key captchas-per-minute ceiling. 0 means uncapped.</summary>
+        public int      MaxCpm       { get; set; }
+        /// <summary>Tokens consumed in the rolling CPM window.</summary>
+        public int      CurrentCpm   { get; set; }
+        /// <summary>Mirror of <see cref="MaxCpm"/> for dashboards.</summary>
+        public int      CpmLimit     { get; set; }
+        /// <summary>ISO 8601 timestamp when an unlimited plan expires.</summary>
+        public string?  UnlimitedExpiresAt { get; set; }
     }
 }

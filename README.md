@@ -21,7 +21,7 @@ var result = await solver.SolveTurnstileAsync(new TurnstileParams {
     SiteKey = "0x4AAAAAAAB...",
     Url     = "https://example.com",
 });
-Console.WriteLine(result.Token);
+Console.WriteLine($"{result.Token} (cost ${result.Cost})");
 
 var challenge = await solver.SolveChallengeAsync(new ChallengeParams {
     Url   = "https://example.com/protected",
@@ -44,7 +44,7 @@ Console.WriteLine(kasada.Ct); // x-kpsdk-ct header value
 Console.WriteLine(kasada.Cd); // x-kpsdk-cd header value
 
 var balance = await solver.GetBalanceAsync();
-Console.WriteLine($"{balance.Balance} / {balance.MaxThreads} threads");
+Console.WriteLine($"${balance.Balance:F4}  CPM: {balance.CurrentCpm}/{balance.CpmLimit}  unlimited={balance.Unlimited}");
 ```
 
 ## Configuration
