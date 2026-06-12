@@ -91,12 +91,13 @@ namespace NSLSolver
                 ["proxy"]          = p.Proxy,
             };
             var json = await PostAsync("/solve", body, ct).ConfigureAwait(false);
-            var headers = json.GetProperty("headers");
+            var hasHeaders = json.TryGetProperty("headers", out var headers)
+                && headers.ValueKind == JsonValueKind.Object;
             return new KasadaResult {
-                Ct   = headers.GetProperty("x-kpsdk-ct").GetString()!,
-                Cd   = headers.GetProperty("x-kpsdk-cd").GetString()!,
-                V    = headers.GetProperty("x-kpsdk-v").GetString()!,
-                H    = headers.GetProperty("x-kpsdk-h").GetString()!,
+                Ct   = hasHeaders ? ReadHeader(headers, "x-kpsdk-ct") : "",
+                Cd   = hasHeaders ? ReadHeader(headers, "x-kpsdk-cd") : "",
+                V    = hasHeaders ? ReadHeader(headers, "x-kpsdk-v")  : "",
+                H    = hasHeaders ? ReadHeader(headers, "x-kpsdk-h")  : "",
                 Cost = ReadDouble(json, "cost"),
             };
         }
@@ -133,6 +134,43 @@ namespace NSLSolver
             };
         }
 
+        /// <summary>
+        /// Solve a reCAPTCHA v3 (incl. Enterprise) challenge. <c>SiteKey</c>,
+        /// <c>Url</c>, and <c>Proxy</c> are required. <c>Action</c> defaults to
+        /// <c>"verify"</c> server-side when omitted. Set <c>Enterprise</c> to
+        /// <c>true</c> for reCAPTCHA Enterprise site keys.
+        /// </summary>
+        public async Task<RecaptchaV3Result> SolveRecaptchaV3Async(RecaptchaV3Params p, CancellationToken ct = default)
+        {
+            var body = new Dictionary<string, object?> {
+                ["type"]     = "recaptchav3",
+                ["site_key"] = p.SiteKey,
+                ["url"]      = p.Url,
+                ["proxy"]    = p.Proxy,
+            };
+            // Only send action when set (server defaults to "verify").
+            if (!string.IsNullOrEmpty(p.Action))
+                body["action"] = p.Action;
+            // Only send enterprise when true, and as a real JSON boolean.
+            if (p.Enterprise)
+                body["enterprise"] = true;
+            // Only send user_agent when set.
+            if (!string.IsNullOrEmpty(p.UserAgent))
+                body["user_agent"] = p.UserAgent;
+
+            var json = await PostAsync("/solve", body, ct).ConfigureAwait(false);
+            return new RecaptchaV3Result {
+                Token = json.GetProperty("token").GetString()!,
+                // The response 'type' may be the hyphenated slug "recaptcha-v3"
+                // rather than the request discriminator "recaptchav3"; surface
+                // whatever the server returns instead of assuming.
+                Type = json.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String
+                    ? t.GetString()
+                    : null,
+                Cost = ReadDouble(json, "cost"),
+            };
+        }
+
         public async Task<BalanceResult> GetBalanceAsync(CancellationToken ct = default)
         {
             var req = new HttpRequestMessage(HttpMethod.Get, _baseUrl + "/balance");
@@ -140,14 +178,23 @@ namespace NSLSolver
 
             var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
             var raw  = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            var json = JsonDocument.Parse(raw).RootElement;
+
+            using var doc = TryParseJson(raw);
 
             if (!resp.IsSuccessStatusCode)
-                throw MakeException((int)resp.StatusCode, json);
+                throw MakeException((int)resp.StatusCode, doc?.RootElement, raw);
 
+            if (doc == null)
+                throw new NSLSolverException(
+                    $"Could not parse balance response as JSON: {Truncate(raw)}",
+                    (int)resp.StatusCode);
+
+            var json = doc.RootElement;
             var maxCpm = json.TryGetProperty("max_cpm", out var mc) ? mc.GetInt32() : 0;
             var result = new BalanceResult {
-                Balance    = json.GetProperty("balance").GetDouble(),
+                Balance    = json.TryGetProperty("balance", out var bal) && bal.ValueKind == JsonValueKind.Number
+                    ? bal.GetDouble()
+                    : 0.0,
                 Unlimited  = json.TryGetProperty("unlimited", out var u) && u.GetBoolean(),
                 MaxCpm     = maxCpm,
                 CurrentCpm = json.TryGetProperty("current_cpm", out var cc) ? cc.GetInt32() : 0,
@@ -156,7 +203,7 @@ namespace NSLSolver
                     ? ue.GetString()
                     : null,
             };
-            if (json.TryGetProperty("allowed_types", out var arr))
+            if (json.TryGetProperty("allowed_types", out var arr) && arr.ValueKind == JsonValueKind.Array)
             {
                 var list = new List<string>();
                 foreach (var item in arr.EnumerateArray()) list.Add(item.GetString() ?? "");
@@ -170,6 +217,13 @@ namespace NSLSolver
             if (json.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number)
                 return v.GetDouble();
             return 0.0;
+        }
+
+        private static string ReadHeader(JsonElement headers, string key)
+        {
+            if (headers.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String)
+                return v.GetString() ?? "";
+            return "";
         }
 
         private async Task<JsonElement> PostAsync(string path, Dictionary<string, object?> body, CancellationToken ct)
@@ -189,11 +243,24 @@ namespace NSLSolver
 
                 var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
                 var raw  = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                var json = JsonDocument.Parse(raw).RootElement;
-
-                if (resp.IsSuccessStatusCode) return json;
 
                 int status = (int)resp.StatusCode;
+
+                // Parse defensively: a non-JSON body (e.g. an HTML 502/504 from an
+                // upstream proxy) must surface as an NSLSolverException, not a raw
+                // System.Text.Json.JsonException.
+                using var doc = TryParseJson(raw);
+
+                if (resp.IsSuccessStatusCode)
+                {
+                    if (doc == null)
+                        throw new SolveException(
+                            $"Could not parse solve response as JSON: {Truncate(raw)}", status);
+                    // Clone so the value outlives the disposed JsonDocument (which
+                    // returns its pooled buffer on Dispose).
+                    return doc.RootElement.Clone();
+                }
+
                 bool retryable = status == 429 || status == 503;
 
                 if (retryable && attempt < _maxRetries)
@@ -202,13 +269,48 @@ namespace NSLSolver
                     continue;
                 }
 
-                throw MakeException(status, json);
+                throw MakeException(status, doc?.RootElement, raw);
             }
         }
 
-        private static NSLSolverException MakeException(int status, JsonElement json)
+        /// <summary>
+        /// Parse a response body into a <see cref="JsonDocument"/>, returning
+        /// <c>null</c> when the body is empty or not valid JSON. The caller owns
+        /// the returned document and must dispose it.
+        /// </summary>
+        private static JsonDocument? TryParseJson(string raw)
         {
-            var msg = json.TryGetProperty("error", out var e) ? e.GetString() ?? "" : $"HTTP {status}";
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            try { return JsonDocument.Parse(raw); }
+            catch (JsonException) { return null; }
+        }
+
+        private static string Truncate(string s, int max = 200)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            s = s.Trim();
+            return s.Length <= max ? s : s.Substring(0, max) + "...";
+        }
+
+        private static NSLSolverException MakeException(int status, JsonElement? json, string raw)
+        {
+            string msg;
+            if (json.HasValue && json.Value.ValueKind == JsonValueKind.Object
+                && json.Value.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String)
+            {
+                msg = e.GetString() ?? $"HTTP {status}";
+            }
+            else if (!string.IsNullOrWhiteSpace(raw))
+            {
+                // Non-JSON error body (HTML, plain text, ...): surface the raw text
+                // through the typed exception rather than crashing on deserialization.
+                msg = $"HTTP {status}: {Truncate(raw)}";
+            }
+            else
+            {
+                msg = $"HTTP {status}";
+            }
+
             return status switch {
                 400 => new BadRequestException(msg),
                 401 => new AuthenticationException(msg),
@@ -312,6 +414,35 @@ namespace NSLSolver
 
         /// <summary>Shortcut for the <c>_abck</c> cookie value.</summary>
         public string? Abck => Cookies.TryGetValue("_abck", out var v) ? v : null;
+    }
+
+    public class RecaptchaV3Params
+    {
+        /// <summary>Required. The site's reCAPTCHA site key.</summary>
+        public string  SiteKey    { get; set; } = "";
+        /// <summary>Required. The page URL where the token will be used.</summary>
+        public string  Url        { get; set; } = "";
+        /// <summary>Required. Proxy the solve runs through.</summary>
+        public string  Proxy      { get; set; } = "";
+        /// <summary>Optional. The reCAPTCHA action; defaults to <c>"verify"</c> server-side when omitted.</summary>
+        public string? Action     { get; set; }
+        /// <summary>Set to <c>true</c> for reCAPTCHA Enterprise site keys.</summary>
+        public bool    Enterprise { get; set; }
+        /// <summary>Optional. User agent to associate with the solve.</summary>
+        public string? UserAgent  { get; set; }
+    }
+
+    public class RecaptchaV3Result
+    {
+        /// <summary>The reCAPTCHA v3 token to submit to the target site.</summary>
+        public string  Token { get; set; } = "";
+        /// <summary>
+        /// The response type echoed by the API (the slug <c>"recaptcha-v3"</c>),
+        /// or <c>null</c> when not present.
+        /// </summary>
+        public string? Type  { get; set; }
+        /// <summary>USD deducted from the account balance for this solve.</summary>
+        public double  Cost  { get; set; }
     }
 
     public class BalanceResult

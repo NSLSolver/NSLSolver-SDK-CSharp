@@ -1,6 +1,6 @@
 # NSLSolver C# SDK
 
-C# client for the [NSLSolver](https://nslsolver.com) captcha API. Supports Cloudflare Turnstile, Challenge pages, and Kasada. No third-party dependencies.
+C# client for the [NSLSolver](https://nslsolver.com) captcha API. Supports Cloudflare Turnstile, Challenge pages, Kasada, Akamai Bot Manager, and reCAPTCHA v3. No third-party dependencies.
 
 Requires .NET 6+.
 
@@ -35,13 +35,29 @@ var kasada = await solver.SolveKasadaAsync(new KasadaParams {
     UaVersion = 131,
     KasadaConfig = new KasadaConfig {
         PJsPath = "/ips.js",
-        FpHost  = "https://fp.example.com",
-        TlHost  = "https://tl.example.com",
+        FpHost  = "fp.example.com", // bare hostname, no scheme/path
+        TlHost  = "tl.example.com", // bare hostname, no scheme/path
     },
     Proxy = "http://user:pass@host:port",
 });
 Console.WriteLine(kasada.Ct); // x-kpsdk-ct header value
 Console.WriteLine(kasada.Cd); // x-kpsdk-cd header value
+
+var akamai = await solver.SolveAkamaiAsync(new AkamaiParams {
+    Url       = "https://example.com",
+    UserAgent = "Mozilla/5.0 ... Chrome/131.0.0.0 ...", // required; replay with this same UA
+    Proxy     = "http://user:pass@host:port",           // required; _abck is bound to this exit IP
+});
+Console.WriteLine(akamai.Abck); // _abck cookie value
+
+var recaptcha = await solver.SolveRecaptchaV3Async(new RecaptchaV3Params {
+    SiteKey    = "6Lc...",
+    Url        = "https://example.com",
+    Proxy      = "http://user:pass@host:port", // required
+    Action     = "login",                       // optional; defaults to "verify"
+    Enterprise = false,                          // set true for reCAPTCHA Enterprise site keys
+});
+Console.WriteLine(recaptcha.Token);
 
 var balance = await solver.GetBalanceAsync();
 Console.WriteLine($"${balance.Balance:F4}  CPM: {balance.CurrentCpm}/{balance.CpmLimit}  unlimited={balance.Unlimited}");
@@ -65,19 +81,34 @@ All exceptions extend `NSLSolverException`. 429 and 503 are retried automaticall
 
 ```csharp
 try {
-    var result = await solver.SolveTurnstileAsync(params);
+    var result = await solver.SolveTurnstileAsync(new TurnstileParams {
+        SiteKey = "0x4AAAAAAAB...",
+        Url     = "https://example.com",
+    });
+} catch (BadRequestException) {
+    // invalid parameters (400)
 } catch (AuthenticationException) {
     // bad api key (401)
 } catch (InsufficientBalanceException) {
     // add funds (402)
+} catch (TypeNotAllowedException) {
+    // captcha type not enabled for this key (403)
 } catch (RateLimitException) {
     // 429, all retries exhausted
 } catch (SolveException e) {
-    // 400 or 503 — check e.StatusCode
+    // 503 — check e.StatusCode
 } catch (NSLSolverException e) {
     Console.WriteLine($"HTTP {e.StatusCode}: {e.Message}");
 }
 ```
+
+`BadRequestException` (400), `AuthenticationException` (401),
+`InsufficientBalanceException` (402), `TypeNotAllowedException` (403), and
+`RateLimitException` (429) all extend `NSLSolverException` directly;
+`SolveException` covers 503 (and is also thrown when a successful response
+cannot be parsed). A non-JSON error body (e.g. an HTML 502/504 from an upstream
+proxy) is surfaced through the matching `NSLSolverException` with the raw text
+in the message — it never throws a raw `JsonException`.
 
 ## Documentation
 

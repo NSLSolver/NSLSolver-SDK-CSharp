@@ -6,8 +6,16 @@
     <PackageId>NSLSolver</PackageId>
     <Version>1.1.0</Version>
     <Authors>NSLSolver</Authors>
-    <Description>C# client for the NSLSolver captcha API.</Description>
+    <Company>NSLSolver</Company>
+    <Description>C# client for the NSLSolver captcha API. Supports Cloudflare Turnstile, Challenge pages, Kasada, Akamai Bot Manager, and reCAPTCHA v3.</Description>
+    <PackageTags>captcha;turnstile;cloudflare;kasada;akamai;recaptcha;solver;nslsolver</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://nslsolver.com</PackageProjectUrl>
     <RepositoryUrl>https://github.com/NSLSolver/NSLSolver-SDK-CSharp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 </Project>
